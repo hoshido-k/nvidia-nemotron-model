@@ -1,0 +1,25 @@
+{
+  "id": "shotokishida/nvidia-nemotron-model-reasoning-challenge",
+  "title": "nvidia-nemotron-model-reasoning-challenge",
+  "code_file": "nvidia-nemotron-model-reasoning-challenge.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_tpu": "false",
+  "enable_internet": "false",
+  "dataset_sources": [],
+  "competition_sources": [
+    "nvidia-nemotron-model-reasoning-challenge"
+  ],
+  "kernel_sources": [
+    "metric/nvidia-metric-utility-script",
+    "huikang/nvidia-nemotron-all-linear",
+    "ryanholbrook/nvidia-utility-script"
+  ],
+  "model_sources": [
+    "metric/nemotron-3-nano-30b-a3b-bf16/Transformers/default/1",
+    "huikang/nemotron-adapter/Transformers/default/20"
+  ],
+  "machine_shape": "NvidiaRtxPro6000"
+}

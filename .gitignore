@@ -1,0 +1,27 @@
+# 環境変数
+.env
+
+# データ（大容量・再取得可能）
+data/
+
+# モデルウェイト
+models/
+
+# 出力
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# 一時ファイル
+/tmp/
