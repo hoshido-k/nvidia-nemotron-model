@@ -169,15 +169,41 @@ def build_training_text(tokenizer, example: dict) -> str:
 # モデル
 # ---------------------------------------------------------------------------
 
+def mock_mamba_ssm():
+    """mamba-ssm/causal-conv1d のモックを sys.modules に差し込む。
+
+    trust_remote_code=True で読み込まれるカスタムコードが mamba-ssm を
+    import しようとするが、RTX Pro 6000 環境ではインストール不可。
+    モックを差し込むことで ImportError を回避し、ナイーブ実装にフォールバックさせる。
+    """
+    from unittest.mock import MagicMock
+
+    for mod_name in [
+        "mamba_ssm",
+        "mamba_ssm.ops",
+        "mamba_ssm.ops.triton",
+        "mamba_ssm.ops.triton.layernorm_gated",
+        "mamba_ssm.ops.selective_scan_interface",
+        "causal_conv1d",
+    ]:
+        if mod_name not in sys.modules:
+            sys.modules[mod_name] = MagicMock()
+
+    print("[patch] mamba-ssm mock injected (naive fallback enabled)")
+
+
 def load_model_and_tokenizer(model_dir: str):
     """BF16 でモデルとトークナイザを読み込む。"""
     print(f"[model] loading from {model_dir} ...")
 
+    # mamba-ssm が不要になるよう事前にモックを注入
+    mock_mamba_ssm()
+
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
         device_map="auto",
-        trust_remote_code=False,
-        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        dtype=torch.bfloat16,
     )
     model.config.use_cache = False
     model.gradient_checkpointing_enable()
@@ -187,7 +213,7 @@ def load_model_and_tokenizer(model_dir: str):
         if "modeling_nemotron_h" in name and hasattr(mod, "is_fast_path_available"):
             mod.is_fast_path_available = False
 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=False)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
