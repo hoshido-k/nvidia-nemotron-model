@@ -1,19 +1,27 @@
 """
-LoRA / QLoRA fine-tuning script for nemotron-3-nano-30b.
+LoRA SFT fine-tuning script for nemotron-3-nano-30b.
+
+学習データ形式（CSV）:
+  - prompt      : 問題文
+  - answer      : 答え
+  - generated_cot: 推論過程（CoT）※任意。なければ answer のみで学習
 
 Usage:
     python train.py \
         --model_dir /path/to/model \
-        --data_dir  /path/to/competition/data \
+        --data_csv  /path/to/train_split_with_cot.csv \
         --output_dir /path/to/output \
-        --lora_rank 16 \
-        --epochs 2 \
-        --use_4bit
+        --lora_rank 32 \
+        --epochs 2
 """
 
 import argparse
 import os
+import sys
 import json
+import shutil
+import stat
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -23,8 +31,6 @@ from peft import LoraConfig, get_peft_model, TaskType
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
-    TrainingArguments,
 )
 from trl import SFTTrainer, SFTConfig
 
@@ -36,99 +42,156 @@ from trl import SFTTrainer, SFTConfig
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model_dir",   required=True,  help="ベースモデルのパス")
-    p.add_argument("--data_dir",    required=True,  help="train.csv があるディレクトリ")
+    p.add_argument("--data_csv",    required=True,  help="学習データ CSV のパス")
     p.add_argument("--output_dir",  required=True,  help="アダプタの保存先")
-    p.add_argument("--extra_data",  default=None,   help="追加データCSVのパス（任意）")
-    p.add_argument("--lora_rank",   type=int, default=16)
-    p.add_argument("--lora_alpha",  type=int, default=32)
-    p.add_argument("--lora_dropout",type=float, default=0.05)
-    p.add_argument("--epochs",      type=int, default=2)
-    p.add_argument("--batch_size",  type=int, default=1)
-    p.add_argument("--grad_accum",  type=int, default=8)
-    p.add_argument("--lr",          type=float, default=2e-4)
-    p.add_argument("--max_seq_len", type=int, default=2048)
-    p.add_argument("--use_4bit",    action="store_true", help="QLoRA 4-bit 量子化")
-    p.add_argument("--use_8bit",    action="store_true", help="8-bit 量子化")
+    p.add_argument("--extra_csv",   default=None,   help="追加データ CSV（任意）")
+    p.add_argument("--lora_rank",   type=int,   default=32)
+    p.add_argument("--lora_alpha",  type=int,   default=32)
+    p.add_argument("--lora_dropout",type=float, default=0.0)
+    p.add_argument("--epochs",      type=int,   default=2)
+    p.add_argument("--batch_size",  type=int,   default=1)
+    p.add_argument("--grad_accum",  type=int,   default=4)
+    p.add_argument("--lr",          type=float, default=5e-5)
+    p.add_argument("--max_seq_len", type=int,   default=2048)
+    p.add_argument("--subsample",   type=int,   default=None, help="データをサブサンプリング（動作確認用）")
+    p.add_argument("--zip_output",  action="store_true", help="アダプタを submission.zip に圧縮")
     return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Kaggle Blackwell (RTX Pro 6000) 向け Triton パッチ
+# ---------------------------------------------------------------------------
+
+def apply_triton_patch():
+    """Kaggle の RTX Pro 6000 (Blackwell) で学習するために必要なパッチ。"""
+    import torch.nn.functional as F
+
+    # RMSNorm を pure PyTorch 実装に置き換え（Triton カーネルのクラッシュ回避）
+    def _pure_rmsnorm_fn(x, weight, bias=None, z=None, eps=1e-5,
+                         group_size=None, norm_before_gate=True, upcast=True):
+        dtype = x.dtype
+        if upcast:
+            x = x.float()
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x_normed = x * torch.rsqrt(variance + eps)
+        out = x_normed * weight.float()
+        if bias is not None:
+            out = out + bias.float()
+        if z is not None:
+            out = out * F.silu(z.float())
+        return out.to(dtype)
+
+    for name, mod in list(sys.modules.items()):
+        if hasattr(mod, "rmsnorm_fn"):
+            mod.rmsnorm_fn = _pure_rmsnorm_fn
+
+    # ptxas-blackwell バイナリをコピー
+    ptxas_src = "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia_utility_script/triton/backends/nvidia/bin/ptxas-blackwell"
+    ptxas_dst = "/tmp/ptxas-blackwell"
+    if os.path.exists(ptxas_src) and not os.path.exists(ptxas_dst):
+        shutil.copy2(ptxas_src, ptxas_dst)
+        os.chmod(ptxas_dst, os.stat(ptxas_dst).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        print("[patch] ptxas-blackwell copied to /tmp")
+
+    os.environ["TRITON_PTXAS_BLACKWELL_PATH"] = ptxas_dst
+    print("[patch] Triton patch applied")
 
 
 # ---------------------------------------------------------------------------
 # データ
 # ---------------------------------------------------------------------------
 
-def load_dataset(data_dir: str, extra_data: str | None) -> Dataset:
-    """train.csv を読み込み、chat 形式に変換する。"""
+PROMPT_SUFFIX = "\nPlease put your final answer inside `\\boxed{}`. For example: `\\boxed{your answer}`"
+
+def load_dataset(data_csv: str, extra_csv: str | None, subsample: int | None) -> Dataset:
+    """CSV を読み込み HuggingFace Dataset に変換する。"""
     dfs = []
 
-    train_csv = Path(data_dir) / "train.csv"
-    if train_csv.exists():
-        dfs.append(pd.read_csv(train_csv))
-        print(f"[data] train.csv: {len(dfs[-1])} rows")
-    else:
-        print(f"[warn] train.csv not found: {train_csv}")
-
-    if extra_data and Path(extra_data).exists():
-        dfs.append(pd.read_csv(extra_data))
-        print(f"[data] extra_data: {len(dfs[-1])} rows")
+    for path in [data_csv, extra_csv]:
+        if path and Path(path).exists():
+            df = pd.read_csv(path)
+            dfs.append(df)
+            print(f"[data] {path}: {len(df)} rows")
+        elif path:
+            print(f"[warn] not found: {path}")
 
     if not dfs:
-        raise FileNotFoundError(f"No data found in {data_dir}")
+        raise FileNotFoundError(f"No data found: {data_csv}")
 
     df = pd.concat(dfs, ignore_index=True)
     df = df.dropna(subset=["prompt", "answer"])
+
+    if subsample:
+        df = df.sample(n=min(subsample, len(df)), random_state=42)
+        print(f"[data] subsampled to {len(df)} rows")
+
     print(f"[data] total: {len(df)} rows")
+    if "type" in df.columns:
+        print(df["type"].value_counts().to_string())
 
-    return Dataset.from_pandas(df[["prompt", "answer"]])
+    return Dataset.from_pandas(df.reset_index(drop=True))
 
 
-def format_sample(tokenizer, sample: dict) -> str:
-    """1サンプルを chat template 形式に変換する。"""
+def build_training_text(tokenizer, example: dict) -> str:
+    """1サンプルを chat template 形式に変換する。
+
+    CoT あり: 推論過程 + \\boxed{answer}
+    CoT なし: answer のみ
+    """
+    cot = example.get("generated_cot", "")
+    answer = str(example["answer"])
+    prompt = example["prompt"]
+
+    user_msg = prompt + PROMPT_SUFFIX
+
+    if cot and str(cot).strip():
+        assistant_msg = f"{cot}\n\n\\boxed{{{answer}}}"
+    else:
+        assistant_msg = f"\\boxed{{{answer}}}"
+
     messages = [
-        {"role": "user",      "content": sample["prompt"]},
-        {"role": "assistant", "content": str(sample["answer"])},
+        {"role": "user",      "content": user_msg},
+        {"role": "assistant", "content": assistant_msg},
     ]
-    return tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=False,
-    )
+
+    try:
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+    except Exception:
+        # chat template が使えない場合のフォールバック
+        return f"User: {user_msg}\nAssistant: {assistant_msg}"
 
 
 # ---------------------------------------------------------------------------
 # モデル
 # ---------------------------------------------------------------------------
 
-def load_model_and_tokenizer(model_dir: str, use_4bit: bool, use_8bit: bool):
-    """ベースモデルとトークナイザを読み込む。"""
+def load_model_and_tokenizer(model_dir: str):
+    """BF16 でモデルとトークナイザを読み込む。"""
     print(f"[model] loading from {model_dir} ...")
-
-    # 量子化設定
-    bnb_config = None
-    if use_4bit:
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
-        print("[model] QLoRA 4-bit (NF4) enabled")
-    elif use_8bit:
-        bnb_config = BitsAndBytesConfig(load_in_8bit=True)
-        print("[model] 8-bit quantization enabled")
 
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
-        quantization_config=bnb_config,
-        torch_dtype=torch.bfloat16 if not (use_4bit or use_8bit) else None,
         device_map="auto",
         trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
     )
-    model.config.use_cache = False  # 学習時は無効化
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable()
+
+    # Nemotron 特有の fast path を無効化（学習時の安定性確保）
+    for name, mod in sys.modules.items():
+        if "modeling_nemotron_h" in name and hasattr(mod, "is_fast_path_available"):
+            mod.is_fast_path_available = False
 
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    print(f"[model] loaded. dtype={next(model.parameters()).dtype}")
     return model, tokenizer
 
 
@@ -136,14 +199,13 @@ def load_model_and_tokenizer(model_dir: str, use_4bit: bool, use_8bit: bool):
 # LoRA
 # ---------------------------------------------------------------------------
 
-# 参照アダプタ（huikang/nvidia-nemotron-all-linear）に合わせた target_modules
 TARGET_MODULES = [
-    "k_proj", "o_proj", "in_proj", "q_proj",
-    "up_proj", "v_proj", "down_proj", "out_proj", "lm_head",
+    "q_proj", "k_proj", "v_proj", "o_proj",
+    "in_proj", "out_proj", "up_proj", "down_proj",
+    "lm_head",
 ]
 
 def apply_lora(model, args):
-    """LoRA を適用して学習対象パラメータを絞る。"""
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=args.lora_rank,
@@ -164,19 +226,26 @@ def apply_lora(model, args):
 def train(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # データ
-    dataset = load_dataset(args.data_dir, args.extra_data)
+    # Kaggle 環境なら Triton パッチを適用
+    if os.path.exists("/kaggle"):
+        apply_triton_patch()
 
-    # モデル
-    model, tokenizer = load_model_and_tokenizer(
-        args.model_dir, args.use_4bit, args.use_8bit
-    )
+    # データ
+    dataset = load_dataset(args.data_csv, args.extra_csv, args.subsample)
+
+    # モデル・トークナイザ
+    model, tokenizer = load_model_and_tokenizer(args.model_dir)
     model = apply_lora(model, args)
 
-    # テキスト変換（SFTTrainer に渡す形式）
+    # テキスト変換
     def formatting_func(samples):
-        return [format_sample(tokenizer, {"prompt": p, "answer": a})
-                for p, a in zip(samples["prompt"], samples["answer"])]
+        return [
+            build_training_text(
+                tokenizer,
+                {k: samples[k][i] for k in samples}
+            )
+            for i in range(len(samples["prompt"]))
+        ]
 
     # 学習設定
     training_args = SFTConfig(
@@ -189,9 +258,10 @@ def train(args):
         warmup_ratio=0.05,
         bf16=True,
         logging_steps=10,
-        save_strategy="epoch",
+        save_strategy="no",        # Kaggle の容量節約
         max_seq_length=args.max_seq_len,
         report_to="none",
+        dataloader_pin_memory=False,
     )
 
     trainer = SFTTrainer(
@@ -201,8 +271,7 @@ def train(args):
         formatting_func=formatting_func,
     )
 
-    # 学習
-    print("[train] start training ...")
+    print("[train] start ...")
     trainer.train()
 
     # アダプタ保存
@@ -210,11 +279,26 @@ def train(args):
     model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
 
-    # 設定ファイルのサマリー出力
-    adapter_config_path = Path(args.output_dir) / "adapter_config.json"
-    if adapter_config_path.exists():
-        with open(adapter_config_path) as f:
+    # adapter_config 確認
+    cfg_path = Path(args.output_dir) / "adapter_config.json"
+    if cfg_path.exists():
+        with open(cfg_path) as f:
             print("[train] adapter_config:", json.dumps(json.load(f), indent=2))
+
+    # submission.zip 作成
+    if args.zip_output:
+        zip_path = str(Path(args.output_dir).parent / "submission.zip")
+        required = ["adapter_config.json", "adapter_model.safetensors"]
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fname in os.listdir(args.output_dir):
+                fpath = os.path.join(args.output_dir, fname)
+                if os.path.isfile(fpath):
+                    zf.write(fpath, fname)
+        for req in required:
+            if req not in os.listdir(args.output_dir):
+                raise AssertionError(f"CRITICAL: {req} が見つかりません。提出に失敗します。")
+        size_mb = os.path.getsize(zip_path) / 1024 / 1024
+        print(f"[train] submission.zip saved ({size_mb:.1f} MB): {zip_path}")
 
     print("[train] done.")
 
