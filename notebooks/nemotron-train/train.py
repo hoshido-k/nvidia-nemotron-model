@@ -169,40 +169,9 @@ def build_training_text(tokenizer, example: dict) -> str:
 # モデル
 # ---------------------------------------------------------------------------
 
-def mock_mamba_ssm():
-    """mamba-ssm/causal-conv1d のモックを sys.modules に差し込む。
-
-    trust_remote_code=True で読み込まれるカスタムコードが mamba-ssm を
-    import しようとするが、RTX Pro 6000 環境ではインストール不可。
-    types.ModuleType で正規のモジュールオブジェクトを差し込み、
-    importlib.util.find_spec が __spec__ を参照しても ValueError にならないようにする。
-    """
-    import types
-
-    for mod_name in [
-        "mamba_ssm",
-        "mamba_ssm.ops",
-        "mamba_ssm.ops.triton",
-        "mamba_ssm.ops.triton.layernorm_gated",
-        "mamba_ssm.ops.selective_scan_interface",
-        "causal_conv1d",
-    ]:
-        if mod_name not in sys.modules:
-            mod = types.ModuleType(mod_name)
-            mod.__spec__ = None
-            # よく参照される属性をNoneで埋めてAttributeErrorを防ぐ
-            mod.__version__ = "0.0.0"
-            sys.modules[mod_name] = mod
-
-    print("[patch] mamba-ssm mock injected (naive fallback enabled)")
-
-
 def load_model_and_tokenizer(model_dir: str):
     """BF16 でモデルとトークナイザを読み込む。"""
     print(f"[model] loading from {model_dir} ...")
-
-    # mamba-ssm が不要になるよう事前にモックを注入
-    mock_mamba_ssm()
 
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
