@@ -176,7 +176,7 @@ def load_model_and_tokenizer(model_dir: str):
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
         device_map="auto",
-        trust_remote_code=True,
+        trust_remote_code=False,
         torch_dtype=torch.bfloat16,
     )
     model.config.use_cache = False
@@ -187,7 +187,7 @@ def load_model_and_tokenizer(model_dir: str):
         if "modeling_nemotron_h" in name and hasattr(mod, "is_fast_path_available"):
             mod.is_fast_path_available = False
 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=False)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
