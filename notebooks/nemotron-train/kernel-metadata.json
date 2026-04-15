@@ -19,6 +19,5 @@
   "model_sources": [
     "metric/nemotron-3-nano-30b-a3b-bf16/Transformers/default/1"
   ],
-  "machine_shape": "NvidiaRtxPro6000",
-  "run_on_push": false
+  "machine_shape": "NvidiaRtxPro6000"
 }
