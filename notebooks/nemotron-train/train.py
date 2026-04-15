@@ -17,12 +17,18 @@ Usage:
 
 import argparse
 import os
+import site
 import sys
 import json
 import shutil
 import stat
 import zipfile
 from pathlib import Path
+
+# Kaggle 環境では mamba_ssm が特殊パスに格納されているため事前に追加
+_KAGGLE_MAMBA_PATH = "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia-utility-script/nvidia_cutlass_dsl/python_packages/"
+if os.path.exists(_KAGGLE_MAMBA_PATH):
+    site.addsitedir(_KAGGLE_MAMBA_PATH)
 
 import pandas as pd
 import torch
