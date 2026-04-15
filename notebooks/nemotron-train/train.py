@@ -259,7 +259,6 @@ def train(args):
         bf16=True,
         logging_steps=10,
         save_strategy="no",        # Kaggle の容量節約
-        max_seq_length=args.max_seq_len,
         report_to="none",
         dataloader_pin_memory=False,
     )
@@ -269,6 +268,7 @@ def train(args):
         args=training_args,
         train_dataset=dataset,
         formatting_func=formatting_func,
+        max_seq_length=args.max_seq_len,
     )
 
     print("[train] start ...")
