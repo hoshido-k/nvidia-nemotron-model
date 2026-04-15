@@ -174,9 +174,10 @@ def mock_mamba_ssm():
 
     trust_remote_code=True で読み込まれるカスタムコードが mamba-ssm を
     import しようとするが、RTX Pro 6000 環境ではインストール不可。
-    モックを差し込むことで ImportError を回避し、ナイーブ実装にフォールバックさせる。
+    types.ModuleType で正規のモジュールオブジェクトを差し込み、
+    importlib.util.find_spec が __spec__ を参照しても ValueError にならないようにする。
     """
-    from unittest.mock import MagicMock
+    import types
 
     for mod_name in [
         "mamba_ssm",
@@ -187,7 +188,11 @@ def mock_mamba_ssm():
         "causal_conv1d",
     ]:
         if mod_name not in sys.modules:
-            sys.modules[mod_name] = MagicMock()
+            mod = types.ModuleType(mod_name)
+            mod.__spec__ = None
+            # よく参照される属性をNoneで埋めてAttributeErrorを防ぐ
+            mod.__version__ = "0.0.0"
+            sys.modules[mod_name] = mod
 
     print("[patch] mamba-ssm mock injected (naive fallback enabled)")
 
