@@ -1,4 +1,4 @@
-name: Push nemotron-train Notebook to Kaggle
+name: Push nemotron-train to Kaggle
 
 on:
   push:
@@ -6,10 +6,11 @@ on:
       - main
     paths:
       - "notebooks/nemotron-train/**"
+      - "kaggle-datasets/nemotron-train-scripts/**"
   workflow_dispatch:
 
 jobs:
-  push:
+  push-notebook:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,3 +28,23 @@ jobs:
         run: |
           export KAGGLE_TOKEN=$KAGGLE_API_TOKEN
           kaggle kernels push -p notebooks/nemotron-train
+
+  push-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Kaggle CLI
+        run: pip install kaggle
+
+      - name: Sync train.py to Kaggle Dataset
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: |
+          export KAGGLE_TOKEN=$KAGGLE_API_TOKEN
+          cp notebooks/nemotron-train/train.py kaggle-datasets/nemotron-train-scripts/train.py
+          kaggle datasets version -p kaggle-datasets/nemotron-train-scripts -m "auto-sync from git $(git rev-parse --short HEAD)"

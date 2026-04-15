@@ -9,7 +9,8 @@
   "enable_tpu": "false",
   "enable_internet": "true",
   "dataset_sources": [
-    "konbu17/nemotron-sft-lora-cot-selection"
+    "konbu17/nemotron-sft-lora-cot-selection",
+    "shotokishida/nemotron-train-scripts"
   ],
   "competition_sources": [
     "nvidia-nemotron-model-reasoning-challenge"
