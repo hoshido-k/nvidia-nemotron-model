@@ -25,10 +25,17 @@ import stat
 import zipfile
 from pathlib import Path
 
-# Kaggle 環境では mamba_ssm が特殊パスに格納されているため事前に追加
-_KAGGLE_MAMBA_PATH = "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia-utility-script/nvidia_cutlass_dsl/python_packages/"
-if os.path.exists(_KAGGLE_MAMBA_PATH):
-    site.addsitedir(_KAGGLE_MAMBA_PATH)
+# Kaggle UTILITY SCRIPTS 環境では cutlass が特殊パスに格納されているため追加
+# （mamba_ssm/__init__.py が transitively に cutlass を import するため必要）
+# ハイフン版・アンダースコア版の両方を試す
+for _cutlass_path in [
+    "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia-utility-script/nvidia_cutlass_dsl/python_packages/",
+    "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia_utility_script/nvidia_cutlass_dsl/python_packages/",
+]:
+    if os.path.exists(_cutlass_path):
+        site.addsitedir(_cutlass_path)
+        print(f"[setup] cutlass path added: {_cutlass_path}")
+        break
 
 import pandas as pd
 import torch
