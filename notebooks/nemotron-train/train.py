@@ -64,6 +64,7 @@ def parse_args():
     p.add_argument("--subsample",    type=int,   default=None, help="データをサブサンプリング（動作確認用）")
     p.add_argument("--zip_output",   action="store_true", help="アダプタを submission.zip に圧縮")
     p.add_argument("--load_in_4bit", action="store_true", help="4bit量子化でロード（QLoRA）。VRAM 節約・高速化")
+    p.add_argument("--save_steps",   type=int, default=None, help="N ステップごとにチェックポイントを保存")
     return p.parse_args()
 
 
@@ -424,9 +425,18 @@ def train(args):
         args.data_csv, args.extra_csv, args.subsample, tokenizer,
     )
 
+    # チェックポイント設定
+    ckpt_dir = str(Path(args.output_dir).parent / "checkpoints")
+    if args.save_steps:
+        save_strategy = "steps"
+        os.makedirs(ckpt_dir, exist_ok=True)
+        print(f"[train] checkpoint dir: {ckpt_dir} (every {args.save_steps} steps)")
+    else:
+        save_strategy = "no"
+
     # 学習設定
     training_args = SFTConfig(
-        output_dir=args.output_dir,
+        output_dir=ckpt_dir if args.save_steps else args.output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
@@ -437,8 +447,11 @@ def train(args):
         tf32=True,
         gradient_checkpointing=False,
         logging_steps=10,
-        save_strategy="no",
-        report_to="none",
+        save_strategy=save_strategy,
+        save_steps=args.save_steps or 500,
+        save_total_limit=3,
+        report_to="tensorboard",
+        logging_dir=str(Path(args.output_dir).parent / "tb_logs"),
         dataloader_num_workers=4,
         dataloader_pin_memory=True,
         dataloader_prefetch_factor=2,
