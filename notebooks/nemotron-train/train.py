@@ -287,6 +287,14 @@ def apply_lora(model, args):
         model = prepare_model_for_kbit_training(
             model, use_gradient_checkpointing=True
         )
+        # Nemotron-H MoE の index_add_ で BF16/FP32 の型不一致が起きるためパッチ
+        _orig_index_add_ = torch.Tensor.index_add_
+        def _patched_index_add_(self, dim, index, source, *args, **kwargs):
+            if source.dtype != self.dtype:
+                source = source.to(self.dtype)
+            return _orig_index_add_(self, dim, index, source, *args, **kwargs)
+        torch.Tensor.index_add_ = _patched_index_add_
+        print("[patch] index_add_ dtype mismatch patch applied")
     else:
         model.gradient_checkpointing_enable()
 
