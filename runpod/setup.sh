@@ -26,7 +26,15 @@ pip install \
 echo "=== [3/4] Kaggle CLI (モデル・データDL用) ==="
 pip install kaggle
 
-echo "=== [4/4] 確認 ==="
+echo "=== [4/4] Claude Code ==="
+if ! command -v node &>/dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y nodejs
+fi
+curl -fsSL https://claude.ai/install.sh | bash
+echo "Claude Code インストール完了。初回は 'claude /login' で認証してください。"
+
+echo "=== [5/5] 確認 ==="
 python - <<'EOF'
 import torch
 print(f"PyTorch: {torch.__version__}")
@@ -41,5 +49,6 @@ echo ""
 echo "=== Setup complete! ==="
 echo ""
 echo "次のステップ:"
-echo "  1. bash runpod/download_data.sh  # モデル・データDL"
-echo "  2. bash runpod/train.sh          # 学習実行"
+echo "  1. claude /login                 # Claude Code 認証（初回のみ）"
+echo "  2. bash runpod/download_data.sh  # モデル・データDL"
+echo "  3. bash runpod/train.sh          # 学習実行"
