@@ -250,16 +250,18 @@ def train(args):
     model, tokenizer = load_model_and_tokenizer(args.model_dir)
     model = apply_lora(model, args)
 
-    # テキスト変換
-    # TRL の新バージョンは batched=False で呼ぶため、
-    # 単一サンプル（dict of scalars）を受け取り文字列を返す形式にする
-    def formatting_func(example):
-        return build_training_text(tokenizer, example)
+    # テキスト変換 - "text" 列だけのデータセットに変換する
+    # TRL 1.1.0 は "prompt" 列があると prompt/completion フォーマットと判断し
+    # "completion" 列も要求するため、事前に "text" のみに変換して渡す
+    text_dataset = dataset.map(
+        lambda example: {"text": build_training_text(tokenizer, example)},
+        remove_columns=dataset.column_names,
+        desc="Formatting dataset",
+    )
+    print(f"[data] formatted {len(text_dataset)} samples")
 
     # 学習設定
-    # max_seq_length は TRL バージョンによって SFTConfig/SFTTrainer どちらも
-    # 受け付けない場合があるため、tokenizer 側で truncation を行う
-    total_steps = (len(dataset) // (args.batch_size * args.grad_accum)) * args.epochs
+    total_steps = (len(text_dataset) // (args.batch_size * args.grad_accum)) * args.epochs
     warmup_steps = max(1, int(total_steps * 0.05))
 
     training_args = SFTConfig(
@@ -280,8 +282,7 @@ def train(args):
     trainer = SFTTrainer(
         model=model,
         args=training_args,
-        train_dataset=dataset,
-        formatting_func=formatting_func,
+        train_dataset=text_dataset,
     )
 
     print("[train] start ...")
