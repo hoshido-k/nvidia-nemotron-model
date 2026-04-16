@@ -53,7 +53,7 @@ def parse_args():
     p.add_argument("--data_csv",     required=True,  help="学習データ CSV のパス")
     p.add_argument("--output_dir",   required=True,  help="アダプタの保存先")
     p.add_argument("--extra_csv",    default=None,   help="追加データ CSV（任意）")
-    p.add_argument("--lora_rank",    type=int,   default=32)
+    p.add_argument("--lora_rank",    type=int,   default=16)
     p.add_argument("--lora_alpha",   type=int,   default=32)
     p.add_argument("--lora_dropout", type=float, default=0.05)
     p.add_argument("--epochs",       type=int,   default=2)
@@ -375,10 +375,9 @@ def apply_lora(model, args):
             return _orig_index_add_(self, dim, index, source, *args, **kwargs)
         torch.Tensor.index_add_ = _patched_index_add_
         print("[patch] index_add_ dtype mismatch patch applied")
-    else:
-        model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
-        )
+    # 4bit でない場合は gradient_checkpointing を使わない
+    # 95GB VRAM に対して BF16 30B（約60GB）+ 諸々で余裕があるため
+    # gradient_checkpointing は 1.5〜2x の速度低下を引き起こす
 
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -436,8 +435,7 @@ def train(args):
         warmup_ratio=0.05,
         bf16=True,
         tf32=True,
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing=False,
         logging_steps=10,
         save_strategy="no",
         report_to="none",
