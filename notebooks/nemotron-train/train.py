@@ -248,14 +248,15 @@ def load_model_and_tokenizer(model_dir: str, load_in_4bit: bool = False):
             quantization_config=bnb_config,
         )
         print("[model] loaded. 4-bit NF4 quantized (QLoRA)")
+        print(f"[model] device: {next(model.parameters()).device}")
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model_dir,
             device_map="auto",
             trust_remote_code=True,
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,
         )
-        print(f"[model] loaded. dtype={next(model.parameters()).dtype}")
+        print(f"[model] loaded. dtype={next(model.parameters()).dtype}, device={next(model.parameters()).device}")
 
     model.config.use_cache = False
 
@@ -317,6 +318,14 @@ def apply_lora(model, args):
 
 def train(args):
     os.makedirs(args.output_dir, exist_ok=True)
+
+    # GPU 確認
+    print(f"[env] CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"[env] GPU: {torch.cuda.get_device_name(0)}")
+        print(f"[env] VRAM total: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    else:
+        print("[env] WARNING: CUDA not available — running on CPU!")
 
     # Kaggle 環境: offline wheel から mamba_ssm をインストール → Triton パッチ
     if os.path.exists("/kaggle"):
