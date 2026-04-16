@@ -261,6 +261,11 @@ def train(args):
         ]
 
     # 学習設定
+    # max_seq_length は TRL バージョンによって SFTConfig/SFTTrainer どちらも
+    # 受け付けない場合があるため、tokenizer 側で truncation を行う
+    total_steps = (len(dataset) // (args.batch_size * args.grad_accum)) * args.epochs
+    warmup_steps = max(1, int(total_steps * 0.05))
+
     training_args = SFTConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
@@ -268,13 +273,12 @@ def train(args):
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
+        warmup_steps=warmup_steps,
         bf16=True,
         logging_steps=10,
         save_strategy="no",        # Kaggle の容量節約
         report_to="none",
         dataloader_pin_memory=False,
-        max_seq_length=args.max_seq_len,
     )
 
     trainer = SFTTrainer(
