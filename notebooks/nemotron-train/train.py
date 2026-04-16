@@ -254,16 +254,11 @@ def load_model_and_tokenizer(model_dir: str, load_in_4bit: bool = False):
             model_dir,
             device_map="auto",
             trust_remote_code=True,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
         )
         print(f"[model] loaded. dtype={next(model.parameters()).dtype}, device={next(model.parameters()).device}")
 
     model.config.use_cache = False
-
-    # Nemotron 特有の fast path を無効化（学習時の安定性確保）
-    for name, mod in sys.modules.items():
-        if "modeling_nemotron_h" in name and hasattr(mod, "is_fast_path_available"):
-            mod.is_fast_path_available = False
 
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
     if tokenizer.pad_token is None:
