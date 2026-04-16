@@ -27,10 +27,10 @@ python "$REPO_DIR/notebooks/nemotron-train/train.py" \
     --lora_rank   32 \
     --lora_alpha  32 \
     --epochs      2 \
-    --batch_size  4 \
-    --grad_accum  1 \
-    --lr          5e-5 \
-    --max_seq_len 2048 \
+    --batch_size  1 \
+    --grad_accum  8 \
+    --lr          1e-4 \
+    --max_seq_len 4096 \
     --zip_output
 
 echo ""

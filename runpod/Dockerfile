@@ -11,12 +11,12 @@ RUN pip install torch==2.4.0 torchvision==0.19.0 \
     --index-url https://download.pytorch.org/whl/cu124 \
     --force-reinstall --quiet
 
-# mamba-ssm + causal-conv1d をインストール
-# SKIP_CUDA_BUILD=TRUE でCUDAコンパイルをスキップ → Mac でもビルド可能
-# 実行時に Triton JIT が自動コンパイル（Kaggle UTILITY SCRIPTS と同じ仕組み）
+# mamba-ssm + causal-conv1d をCUDA拡張込みでインストール
+# --no-build-isolation: setup.py が torch を参照するため隔離ビルドを無効化
+# devel イメージに nvcc が含まれるためビルド時にCUDA拡張をコンパイル可能
 RUN pip install nvidia-cutlass && \
-    CAUSAL_CONV1D_SKIP_CUDA_BUILD=TRUE pip install "causal-conv1d>=1.4.0" && \
-    MAMBA_SKIP_CUDA_BUILD=TRUE pip install "git+https://github.com/state-spaces/mamba.git"
+    pip install "causal-conv1d>=1.4.0" --no-build-isolation && \
+    pip install "git+https://github.com/state-spaces/mamba.git" --no-build-isolation
 
 # ML ライブラリ
 COPY requirements.txt /tmp/requirements.txt

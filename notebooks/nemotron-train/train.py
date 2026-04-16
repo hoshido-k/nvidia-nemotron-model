@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import glob
+import hashlib
 import os
 import re
 import subprocess
@@ -30,6 +31,7 @@ import sys
 import json
 import shutil
 import stat
+import time
 import zipfile
 from pathlib import Path
 
@@ -145,6 +147,12 @@ def apply_triton_patch():
     os.environ["TRITON_PTXAS_BLACKWELL_PATH"] = ptxas_dst
     os.environ["TRITON_PTXAS_PATH"] = ptxas_dst
 
+    # Triton JIT キャッシュを永続化（セッション再起動時の再コンパイルを回避）
+    triton_cache = "/kaggle/working/.triton_cache"
+    os.makedirs(triton_cache, exist_ok=True)
+    os.environ["TRITON_CACHE_DIR"] = triton_cache
+    print(f"[patch] Triton cache dir: {triton_cache}")
+
     # Triton のバージョンチェックをパッチ（Blackwell では ptxas 12.0 扱いにする）
     try:
         import triton.backends.nvidia.compiler as nv_compiler
@@ -155,11 +163,41 @@ def apply_triton_patch():
     print("[patch] Triton patch applied")
 
 
+def optimize_gpu():
+    """RTX Pro 6000 (Blackwell) の性能を最大限に引き出す GPU 設定。"""
+    if not torch.cuda.is_available():
+        return
+
+    # TF32: Ampere 以降で FP32 演算を TF32 で高速化（精度低下はほぼなし）
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    # cuDNN: 同一サイズの入力が続く学習では benchmark モードが最速
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+
+    # CUDA メモリアロケータの最適化
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+    print("[gpu] TF32 enabled, cuDNN benchmark enabled, expandable_segments enabled")
+
+
 # ---------------------------------------------------------------------------
 # データ
 # ---------------------------------------------------------------------------
 
 PROMPT_SUFFIX = "\nPlease put your final answer inside `\\boxed{}`. For example: `\\boxed{your answer}`"
+
+def _compute_cache_key(data_csv: str, extra_csv: str | None, subsample: int | None) -> str:
+    """CSV ファイルの内容とパラメータからキャッシュキーを生成する。"""
+    h = hashlib.sha256()
+    for path in [data_csv, extra_csv]:
+        if path and Path(path).exists():
+            h.update(Path(path).read_bytes())
+    h.update(f"subsample={subsample}".encode())
+    return h.hexdigest()[:16]
+
 
 def load_dataset(data_csv: str, extra_csv: str | None, subsample: int | None) -> Dataset:
     """CSV を読み込み HuggingFace Dataset に変換する。"""
@@ -188,6 +226,50 @@ def load_dataset(data_csv: str, extra_csv: str | None, subsample: int | None) ->
         print(df["type"].value_counts().to_string())
 
     return Dataset.from_pandas(df.reset_index(drop=True))
+
+
+def load_formatted_dataset(
+    data_csv: str,
+    extra_csv: str | None,
+    subsample: int | None,
+    tokenizer,
+    cache_dir: str = "/kaggle/working/.dataset_cache",
+) -> Dataset:
+    """前処理済みデータセットをキャッシュ付きでロードする。
+
+    初回: CSV → chat template 変換 → Arrow 形式でディスク保存
+    2回目以降: ディスクから即座にロード（数秒）
+
+    キャッシュキーは CSV の内容ハッシュで決定するため、
+    データが変わらなければセッション再起動後も再利用される。
+    """
+    cache_key = _compute_cache_key(data_csv, extra_csv, subsample)
+    cache_path = Path(cache_dir) / cache_key
+
+    if cache_path.exists():
+        t0 = time.time()
+        text_dataset = Dataset.load_from_disk(str(cache_path))
+        print(f"[data] cache hit: {cache_path} ({len(text_dataset)} samples, {time.time() - t0:.1f}s)")
+        return text_dataset
+
+    # キャッシュがない場合は通常ロード → 変換 → 保存
+    dataset = load_dataset(data_csv, extra_csv, subsample)
+
+    t0 = time.time()
+    text_dataset = dataset.map(
+        lambda example: {"text": build_training_text(tokenizer, example)},
+        remove_columns=dataset.column_names,
+        desc="Formatting dataset",
+        num_proc=os.cpu_count(),
+    )
+    print(f"[data] formatted {len(text_dataset)} samples ({time.time() - t0:.1f}s)")
+
+    # キャッシュ保存
+    os.makedirs(cache_dir, exist_ok=True)
+    text_dataset.save_to_disk(str(cache_path))
+    print(f"[data] cache saved: {cache_path}")
+
+    return text_dataset
 
 
 def build_training_text(tokenizer, example: dict) -> str:
@@ -318,6 +400,9 @@ def apply_lora(model, args):
 def train(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # GPU 最適化（TF32, cuDNN benchmark 等）
+    optimize_gpu()
+
     # GPU 確認
     print(f"[env] CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
@@ -331,22 +416,14 @@ def train(args):
         setup_kaggle_env()
         apply_triton_patch()
 
-    # データ
-    dataset = load_dataset(args.data_csv, args.extra_csv, args.subsample)
-
-    # モデル・トークナイザ
+    # モデル・トークナイザ（データロードより先にトークナイザが必要）
     model, tokenizer = load_model_and_tokenizer(args.model_dir, args.load_in_4bit)
     model = apply_lora(model, args)
 
-    # テキスト変換 - "text" 列のみのデータセットに変換
-    # TRL は "prompt" 列があると prompt/completion フォーマットと判断するため
-    # 事前に "text" のみに変換してから渡す
-    text_dataset = dataset.map(
-        lambda example: {"text": build_training_text(tokenizer, example)},
-        remove_columns=dataset.column_names,
-        desc="Formatting dataset",
+    # データ（キャッシュ付き: 2回目以降は数秒でロード）
+    text_dataset = load_formatted_dataset(
+        args.data_csv, args.extra_csv, args.subsample, tokenizer,
     )
-    print(f"[data] formatted {len(text_dataset)} samples")
 
     # 学習設定
     training_args = SFTConfig(
@@ -358,14 +435,18 @@ def train(args):
         lr_scheduler_type="cosine",
         warmup_ratio=0.05,
         bf16=True,
+        tf32=True,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=10,
         save_strategy="no",
         report_to="none",
-        dataloader_num_workers=2,
+        dataloader_num_workers=4,
+        dataloader_pin_memory=True,
+        dataloader_prefetch_factor=2,
         max_length=args.max_seq_len,
         remove_unused_columns=False,
+        torch_compile=False,
     )
 
     trainer = SFTTrainer(
