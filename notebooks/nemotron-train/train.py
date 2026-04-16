@@ -274,6 +274,7 @@ def train(args):
         save_strategy="no",        # Kaggle の容量節約
         report_to="none",
         dataloader_pin_memory=False,
+        max_seq_length=args.max_seq_len,
     )
 
     trainer = SFTTrainer(
@@ -281,7 +282,6 @@ def train(args):
         args=training_args,
         train_dataset=dataset,
         formatting_func=formatting_func,
-        max_seq_length=args.max_seq_len,
     )
 
     print("[train] start ...")
