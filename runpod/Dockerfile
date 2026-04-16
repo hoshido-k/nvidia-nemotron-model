@@ -11,13 +11,12 @@ RUN pip install torch==2.4.0 torchvision==0.19.0 \
     --index-url https://download.pytorch.org/whl/cu124 \
     --force-reinstall --quiet
 
-# mamba-ssm + causal-conv1d を Ada Lovelace (sm_89) 向けにビルド
-# Kaggle utility script と同じアプローチ（--no-build-isolation + ARCH明示）
-ENV TORCH_CUDA_ARCH_LIST="8.9"
-ENV MAX_JOBS="4"
-RUN pip install --no-build-isolation nvidia-cutlass && \
-    pip install --no-build-isolation "causal-conv1d>=1.4.0" && \
-    pip install --no-build-isolation "git+https://github.com/state-spaces/mamba.git"
+# mamba-ssm + causal-conv1d をインストール
+# SKIP_CUDA_BUILD=TRUE でCUDAコンパイルをスキップ → Mac でもビルド可能
+# 実行時に Triton JIT が自動コンパイル（Kaggle UTILITY SCRIPTS と同じ仕組み）
+RUN pip install nvidia-cutlass && \
+    CAUSAL_CONV1D_SKIP_CUDA_BUILD=TRUE pip install "causal-conv1d>=1.4.0" && \
+    MAMBA_SKIP_CUDA_BUILD=TRUE pip install "git+https://github.com/state-spaces/mamba.git"
 
 # ML ライブラリ
 COPY requirements.txt /tmp/requirements.txt
