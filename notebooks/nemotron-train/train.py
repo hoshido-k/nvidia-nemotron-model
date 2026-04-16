@@ -69,32 +69,41 @@ def parse_args():
 # ---------------------------------------------------------------------------
 
 def setup_kaggle_env():
-    """Kaggle 環境で mamba_ssm / causal_conv1d を offline wheel からインストール。
+    """Kaggle 環境の依存パッケージをセットアップする。
 
-    mayukh18/nemotron-packages を Kaggle Input に追加しておく必要がある。
-    参考: https://www.kaggle.com/code/dgxchen/training-with-unsloth-to-achieve-0-81-lb
+    mamba_ssm は UTILITY SCRIPTS に含まれており自動的に使用される。
+    ただし UTILITY SCRIPTS の mamba_ssm (Mamba3版) は cutlass を必要とするため
+    cutlass パスを sys.path に追加する。
+
+    4bit QLoRA を使う場合は bitsandbytes が必要。
+    dennisfong/nvidia-nemotron-offline-packages を Input に追加しておく。
     """
-    all_causal = sorted(glob.glob("/kaggle/input/**/causal*conv1d*.whl", recursive=True))
-    all_mamba  = sorted(glob.glob("/kaggle/input/**/mamba_ssm*.whl",     recursive=True))
+    import site
 
-    print(f"[setup] causal_conv1d wheels: {all_causal}")
-    print(f"[setup] mamba_ssm wheels:     {all_mamba}")
-
-    if not all_mamba:
+    # cutlass パスを追加（UTILITY SCRIPTS の mamba_ssm が必要とする）
+    cutlass_path = "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia_utility_script/nvidia_cutlass_dsl/python_packages/"
+    if os.path.exists(cutlass_path):
+        site.addsitedir(cutlass_path)
+        print(f"[setup] cutlass path added: {cutlass_path}")
+    else:
         raise FileNotFoundError(
-            "mamba_ssm の wheel が見つかりません。"
-            "Kaggle Input に mayukh18/nemotron-packages を追加してください。"
+            f"cutlass が見つかりません: {cutlass_path}\n"
+            "UTILITY SCRIPTS (ryanholbrook/nvidia-utility-script) を Input に追加してください。"
         )
 
-    for wheel in filter(None, [
-        all_causal[-1] if all_causal else None,
-        all_mamba[-1],
-    ]):
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "--no-index", "--no-deps", wheel],
-            check=True,
-        )
-        print(f"[setup] installed: {Path(wheel).name}")
+    # bitsandbytes（QLoRA 用）: dennisfong/nvidia-nemotron-offline-packages から
+    try:
+        import bitsandbytes  # noqa: F401
+    except ImportError:
+        bnb_wheels = sorted(glob.glob("/kaggle/input/**/bitsandbytes*.whl", recursive=True))
+        if bnb_wheels:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", "--no-index", "--no-deps", bnb_wheels[-1]],
+                check=True,
+            )
+            print(f"[setup] installed: {Path(bnb_wheels[-1]).name}")
+        else:
+            print("[setup] bitsandbytes wheel not found (QLoRA --load_in_4bit は使用不可)")
 
 
 # ---------------------------------------------------------------------------
