@@ -38,8 +38,6 @@ from pathlib import Path
 import pandas as pd
 import torch
 from datasets import Dataset
-from peft import LoraConfig, get_peft_model, TaskType
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTTrainer, SFTConfig
 
 
@@ -65,6 +63,7 @@ def parse_args():
     p.add_argument("--zip_output",   action="store_true", help="アダプタを submission.zip に圧縮")
     p.add_argument("--load_in_4bit", action="store_true", help="4bit量子化でロード（QLoRA）。VRAM 節約・高速化")
     p.add_argument("--save_steps",   type=int, default=None, help="N ステップごとにチェックポイントを保存")
+    p.add_argument("--no_unsloth",   action="store_true", help="Unsloth を使わず従来の transformers+PEFT で学習")
     return p.parse_args()
 
 
@@ -108,6 +107,45 @@ def setup_kaggle_env():
             print(f"[setup] installed: {Path(bnb_wheels[-1]).name}")
         else:
             print("[setup] bitsandbytes wheel not found (QLoRA --load_in_4bit は使用不可)")
+
+
+def install_unsloth():
+    """Unsloth をインストールする。オフライン wheel があればそちらを優先。"""
+    try:
+        import unsloth  # noqa: F401
+        print("[setup] unsloth already available")
+        return
+    except ImportError:
+        pass
+
+    # オフライン wheel を探す
+    wheels = sorted(glob.glob("/kaggle/input/**/unsloth*.whl", recursive=True))
+    if wheels:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", wheels[-1]],
+            check=True,
+        )
+        print(f"[setup] installed offline: {Path(wheels[-1]).name}")
+        return
+
+    # オンラインインストール（enable_internet=true の場合）
+    # mayukh18/nemotron-packages にオフライン wheel がある場合はそこからも探す
+    packages_dir = "/kaggle/input/datasets/mayukh18/nemotron-packages/packages"
+    if os.path.isdir(packages_dir):
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q",
+             "--no-index", "--find-links", packages_dir,
+             "unsloth"],
+            check=True,
+        )
+        print(f"[setup] installed unsloth from {packages_dir}")
+        return
+
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", "unsloth"],
+        check=True,
+    )
+    print("[setup] installed unsloth from PyPI")
 
 
 # ---------------------------------------------------------------------------
@@ -304,21 +342,45 @@ def build_training_text(tokenizer, example: dict) -> str:
             messages,
             tokenize=False,
             add_generation_prompt=False,
+            enable_thinking=True,
         )
-    except Exception:
-        return f"User: {user_msg}\nAssistant: {assistant_msg}"
+    except TypeError:
+        # enable_thinking を理解しないトークナイザ向けフォールバック
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
 
 
 # ---------------------------------------------------------------------------
 # モデル
 # ---------------------------------------------------------------------------
 
-def load_model_and_tokenizer(model_dir: str, load_in_4bit: bool = False):
-    """モデルとトークナイザを読み込む。
+def load_model_and_tokenizer_unsloth(model_dir: str, max_seq_len: int, load_in_4bit: bool = False):
+    """Unsloth の FastLanguageModel でモデルとトークナイザを読み込む。"""
+    from unsloth import FastLanguageModel
 
-    load_in_4bit=True: NF4 量子化（QLoRA）。VRAM を大幅削減し高速化。
-    load_in_4bit=False: BF16 フル精度。本番学習向け。
-    """
+    print(f"[model] loading with Unsloth from {model_dir} ...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_dir,
+        max_seq_length=max_seq_len,
+        load_in_4bit=load_in_4bit,
+        load_in_8bit=False,
+        full_finetuning=False,
+        trust_remote_code=True,
+        dtype=torch.bfloat16,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    print("[model] loaded with Unsloth.")
+    return model, tokenizer
+
+
+def load_model_and_tokenizer_hf(model_dir: str, load_in_4bit: bool = False):
+    """従来の transformers でモデルとトークナイザを読み込む。"""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
     print(f"[model] loading from {model_dir} ...")
 
     if load_in_4bit:
@@ -359,10 +421,35 @@ def load_model_and_tokenizer(model_dir: str, load_in_4bit: bool = False):
 # LoRA
 # ---------------------------------------------------------------------------
 
-# Mamba 系レイヤーのみを対象とする（Kaggle ノートブックと同じ）
-TARGET_MODULES = r".*\.(in_proj|out_proj|up_proj|down_proj)$"
+# Attention + Mamba + lm_head を対象とする
+TARGET_MODULES = [
+    "q_proj", "k_proj", "v_proj", "o_proj",      # Attention
+    "in_proj", "out_proj", "up_proj", "down_proj", # Mamba
+    "lm_head",
+]
 
-def apply_lora(model, args):
+def apply_lora_unsloth(model, args):
+    """Unsloth の FastLanguageModel.get_peft_model で LoRA を適用する。"""
+    from unsloth import FastLanguageModel
+
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        target_modules=TARGET_MODULES,
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=42,
+    )
+    model.print_trainable_parameters()
+    return model
+
+
+def apply_lora_peft(model, args):
+    """従来の PEFT get_peft_model で LoRA を適用する。"""
+    from peft import LoraConfig, get_peft_model, TaskType
+
     if args.load_in_4bit:
         from peft import prepare_model_for_kbit_training
         model = prepare_model_for_kbit_training(
@@ -376,9 +463,6 @@ def apply_lora(model, args):
             return _orig_index_add_(self, dim, index, source, *args, **kwargs)
         torch.Tensor.index_add_ = _patched_index_add_
         print("[patch] index_add_ dtype mismatch patch applied")
-    # 4bit でない場合は gradient_checkpointing を使わない
-    # 95GB VRAM に対して BF16 30B（約60GB）+ 諸々で余裕があるため
-    # gradient_checkpointing は 1.5〜2x の速度低下を引き起こす
 
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -411,14 +495,24 @@ def train(args):
     else:
         print("[env] WARNING: CUDA not available — running on CPU!")
 
-    # Kaggle 環境: offline wheel から mamba_ssm をインストール → Triton パッチ
+    use_unsloth = not args.no_unsloth
+
+    # Kaggle 環境: 依存パッケージ → Triton パッチ → Unsloth インストール
     if os.path.exists("/kaggle"):
         setup_kaggle_env()
         apply_triton_patch()
+        if use_unsloth:
+            install_unsloth()
 
     # モデル・トークナイザ（データロードより先にトークナイザが必要）
-    model, tokenizer = load_model_and_tokenizer(args.model_dir, args.load_in_4bit)
-    model = apply_lora(model, args)
+    if use_unsloth:
+        model, tokenizer = load_model_and_tokenizer_unsloth(
+            args.model_dir, args.max_seq_len, args.load_in_4bit,
+        )
+        model = apply_lora_unsloth(model, args)
+    else:
+        model, tokenizer = load_model_and_tokenizer_hf(args.model_dir, args.load_in_4bit)
+        model = apply_lora_peft(model, args)
 
     # データ（キャッシュ付き: 2回目以降は数秒でロード）
     text_dataset = load_formatted_dataset(
@@ -445,14 +539,14 @@ def train(args):
         warmup_ratio=0.05,
         bf16=True,
         tf32=True,
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing=not use_unsloth,
+        gradient_checkpointing_kwargs={"use_reentrant": False} if not use_unsloth else {},
         logging_steps=10,
         save_strategy=save_strategy,
         save_steps=args.save_steps or 500,
-        save_total_limit=3,
-        report_to="tensorboard",
-        logging_dir=str(Path(args.output_dir).parent / "tb_logs"),
+        save_total_limit=1,
+        save_only_model=True,
+        report_to="none",
         dataloader_num_workers=4,
         dataloader_pin_memory=True,
         dataloader_prefetch_factor=2,
