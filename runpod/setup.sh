@@ -32,10 +32,16 @@ else
     echo "PyTorch CUDA 12.4 OK"
 fi
 
-echo "=== [2/5] mamba-ssm + causal-conv1d (sm_89 Ada Lovelace, CUDAビルド) ==="
-# --no-build-isolation: pip の隔離ビルド環境を使わず、
-# 既にインストール済みの torch 2.4.0+cu124 でビルドする
-pip install --no-build-isolation mamba-ssm causal-conv1d
+echo "=== [2/5] causal-conv1d + mamba-ssm (sm_89 Ada Lovelace, CUDAビルド) ==="
+# Kaggle utility script と同じアプローチ:
+#   - TORCH_CUDA_ARCH_LIST でアーキテクチャを明示（sm_89 = Ada Lovelace）
+#   - --no-build-isolation で既インストールの torch を使用
+#   - mamba-ssm は git 最新版（リリース版よりアーキテクチャ対応が広い）
+export TORCH_CUDA_ARCH_LIST="8.9"
+export MAX_JOBS="4"
+pip install --no-build-isolation nvidia-cutlass
+pip install --no-build-isolation "causal-conv1d>=1.4.0"
+pip install --no-build-isolation "git+https://github.com/state-spaces/mamba.git"
 
 echo "=== [3/5] ML ライブラリ (uv) ==="
 uv pip install --system -r "$REPO_DIR/runpod/requirements.txt"
