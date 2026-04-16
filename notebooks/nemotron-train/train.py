@@ -53,7 +53,7 @@ def parse_args():
     p.add_argument("--data_csv",     required=True,  help="学習データ CSV のパス")
     p.add_argument("--output_dir",   required=True,  help="アダプタの保存先")
     p.add_argument("--extra_csv",    default=None,   help="追加データ CSV（任意）")
-    p.add_argument("--lora_rank",    type=int,   default=16)
+    p.add_argument("--lora_rank",    type=int,   default=32)
     p.add_argument("--lora_alpha",   type=int,   default=32)
     p.add_argument("--lora_dropout", type=float, default=0.05)
     p.add_argument("--epochs",       type=int,   default=2)
