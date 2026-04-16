@@ -10,10 +10,23 @@
 
 set -e
 
-echo "=== [1/4] mamba-ssm + causal-conv1d (sm_89 Ada Lovelace) ==="
+echo "=== [0/5] PyTorch CUDA バージョン確認・修正 ==="
+TORCH_CUDA=$(python -c "import torch; print(torch.version.cuda)" 2>/dev/null || echo "none")
+echo "PyTorch CUDA version: $TORCH_CUDA"
+if [ "$TORCH_CUDA" != "12.4" ]; then
+    echo "PyTorch CUDA mismatch (got $TORCH_CUDA, need 12.4). 再インストール..."
+    pip install torch==2.4.0 torchvision==0.19.0 \
+        --index-url https://download.pytorch.org/whl/cu124 \
+        --force-reinstall --quiet
+    echo "PyTorch 2.4.0+cu124 インストール完了"
+else
+    echo "PyTorch CUDA 12.4 OK"
+fi
+
+echo "=== [1/5] mamba-ssm + causal-conv1d (sm_89 Ada Lovelace) ==="
 pip install mamba-ssm causal-conv1d
 
-echo "=== [2/4] ML ライブラリ ==="
+echo "=== [2/5] ML ライブラリ ==="
 pip install \
     "transformers>=4.45.0" \
     "trl==1.1.0" \
@@ -23,10 +36,10 @@ pip install \
     "datasets" \
     "pandas"
 
-echo "=== [3/4] Kaggle CLI (モデル・データDL用) ==="
+echo "=== [3/5] Kaggle CLI (モデル・データDL用) ==="
 pip install kaggle
 
-echo "=== [4/4] Claude Code ==="
+echo "=== [4/5] Claude Code ==="
 if ! command -v node &>/dev/null; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
     apt-get install -y nodejs
@@ -34,7 +47,7 @@ fi
 curl -fsSL https://claude.ai/install.sh | bash
 echo "Claude Code インストール完了。初回は 'claude /login' で認証してください。"
 
-echo "=== [5/5] 確認 ==="
+echo "=== [5/5] 動作確認 ==="
 python - <<'EOF'
 import torch
 print(f"PyTorch: {torch.__version__}")
