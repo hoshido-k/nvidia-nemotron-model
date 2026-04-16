@@ -13,11 +13,18 @@ Usage:
         --output_dir /path/to/output \
         --lora_rank 32 \
         --epochs 2
+
+    # 4bit量子化（QLoRA）— VRAM 節約・高速化
+    python train.py ... --load_in_4bit
+
+    # 動作確認用サブサンプリング
+    python train.py ... --subsample 100
 """
 
 import argparse
+import glob
 import os
-import site
+import subprocess
 import sys
 import json
 import shutil
@@ -25,26 +32,11 @@ import stat
 import zipfile
 from pathlib import Path
 
-# Kaggle UTILITY SCRIPTS 環境では cutlass が特殊パスに格納されているため追加
-# （mamba_ssm/__init__.py が transitively に cutlass を import するため必要）
-# ハイフン版・アンダースコア版の両方を試す
-for _cutlass_path in [
-    "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia-utility-script/nvidia_cutlass_dsl/python_packages/",
-    "/kaggle/usr/lib/notebooks/ryanholbrook/nvidia_utility_script/nvidia_cutlass_dsl/python_packages/",
-]:
-    if os.path.exists(_cutlass_path):
-        site.addsitedir(_cutlass_path)
-        print(f"[setup] cutlass path added: {_cutlass_path}")
-        break
-
 import pandas as pd
 import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model, TaskType
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTTrainer, SFTConfig
 
 
@@ -54,21 +46,55 @@ from trl import SFTTrainer, SFTConfig
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--model_dir",   required=True,  help="ベースモデルのパス")
-    p.add_argument("--data_csv",    required=True,  help="学習データ CSV のパス")
-    p.add_argument("--output_dir",  required=True,  help="アダプタの保存先")
-    p.add_argument("--extra_csv",   default=None,   help="追加データ CSV（任意）")
-    p.add_argument("--lora_rank",   type=int,   default=32)
-    p.add_argument("--lora_alpha",  type=int,   default=32)
-    p.add_argument("--lora_dropout",type=float, default=0.0)
-    p.add_argument("--epochs",      type=int,   default=2)
-    p.add_argument("--batch_size",  type=int,   default=1)
-    p.add_argument("--grad_accum",  type=int,   default=4)
-    p.add_argument("--lr",          type=float, default=5e-5)
-    p.add_argument("--max_seq_len", type=int,   default=2048)
-    p.add_argument("--subsample",   type=int,   default=None, help="データをサブサンプリング（動作確認用）")
-    p.add_argument("--zip_output",  action="store_true", help="アダプタを submission.zip に圧縮")
+    p.add_argument("--model_dir",    required=True,  help="ベースモデルのパス")
+    p.add_argument("--data_csv",     required=True,  help="学習データ CSV のパス")
+    p.add_argument("--output_dir",   required=True,  help="アダプタの保存先")
+    p.add_argument("--extra_csv",    default=None,   help="追加データ CSV（任意）")
+    p.add_argument("--lora_rank",    type=int,   default=32)
+    p.add_argument("--lora_alpha",   type=int,   default=32)
+    p.add_argument("--lora_dropout", type=float, default=0.0)
+    p.add_argument("--epochs",       type=int,   default=2)
+    p.add_argument("--batch_size",   type=int,   default=1)
+    p.add_argument("--grad_accum",   type=int,   default=4)
+    p.add_argument("--lr",           type=float, default=5e-5)
+    p.add_argument("--max_seq_len",  type=int,   default=2048)
+    p.add_argument("--subsample",    type=int,   default=None, help="データをサブサンプリング（動作確認用）")
+    p.add_argument("--zip_output",   action="store_true", help="アダプタを submission.zip に圧縮")
+    p.add_argument("--load_in_4bit", action="store_true", help="4bit量子化でロード（QLoRA）。VRAM 節約・高速化")
     return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Kaggle 環境セットアップ
+# ---------------------------------------------------------------------------
+
+def setup_kaggle_env():
+    """Kaggle 環境で mamba_ssm / causal_conv1d を offline wheel からインストール。
+
+    mayukh18/nemotron-packages を Kaggle Input に追加しておく必要がある。
+    参考: https://www.kaggle.com/code/dgxchen/training-with-unsloth-to-achieve-0-81-lb
+    """
+    all_causal = sorted(glob.glob("/kaggle/input/**/causal*conv1d*.whl", recursive=True))
+    all_mamba  = sorted(glob.glob("/kaggle/input/**/mamba_ssm*.whl",     recursive=True))
+
+    print(f"[setup] causal_conv1d wheels: {all_causal}")
+    print(f"[setup] mamba_ssm wheels:     {all_mamba}")
+
+    if not all_mamba:
+        raise FileNotFoundError(
+            "mamba_ssm の wheel が見つかりません。"
+            "Kaggle Input に mayukh18/nemotron-packages を追加してください。"
+        )
+
+    for wheel in filter(None, [
+        all_causal[-1] if all_causal else None,
+        all_mamba[-1],
+    ]):
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "--no-index", "--no-deps", wheel],
+            check=True,
+        )
+        print(f"[setup] installed: {Path(wheel).name}")
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +133,15 @@ def apply_triton_patch():
         print("[patch] ptxas-blackwell copied to /tmp")
 
     os.environ["TRITON_PTXAS_BLACKWELL_PATH"] = ptxas_dst
+    os.environ["TRITON_PTXAS_PATH"] = ptxas_dst
+
+    # Triton のバージョンチェックをパッチ（Blackwell では ptxas 12.0 扱いにする）
+    try:
+        import triton.backends.nvidia.compiler as nv_compiler
+        nv_compiler.get_ptxas_version = lambda arch: "12.0"
+    except Exception:
+        pass
+
     print("[patch] Triton patch applied")
 
 
@@ -151,7 +186,7 @@ def build_training_text(tokenizer, example: dict) -> str:
     CoT あり: 推論過程 + \\boxed{answer}
     CoT なし: answer のみ
     """
-    cot = example.get("generated_cot", "")
+    cot    = example.get("generated_cot", "")
     answer = str(example["answer"])
     prompt = example["prompt"]
 
@@ -174,7 +209,6 @@ def build_training_text(tokenizer, example: dict) -> str:
             add_generation_prompt=False,
         )
     except Exception:
-        # chat template が使えない場合のフォールバック
         return f"User: {user_msg}\nAssistant: {assistant_msg}"
 
 
@@ -182,18 +216,39 @@ def build_training_text(tokenizer, example: dict) -> str:
 # モデル
 # ---------------------------------------------------------------------------
 
-def load_model_and_tokenizer(model_dir: str):
-    """BF16 でモデルとトークナイザを読み込む。"""
+def load_model_and_tokenizer(model_dir: str, load_in_4bit: bool = False):
+    """モデルとトークナイザを読み込む。
+
+    load_in_4bit=True: NF4 量子化（QLoRA）。VRAM を大幅削減し高速化。
+    load_in_4bit=False: BF16 フル精度。本番学習向け。
+    """
     print(f"[model] loading from {model_dir} ...")
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir,
-        device_map="auto",
-        trust_remote_code=True,
-        dtype=torch.bfloat16,
-    )
+    if load_in_4bit:
+        from transformers import BitsAndBytesConfig
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            device_map="auto",
+            trust_remote_code=True,
+            quantization_config=bnb_config,
+        )
+        print("[model] loaded. 4-bit NF4 quantized (QLoRA)")
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            device_map="auto",
+            trust_remote_code=True,
+            dtype=torch.bfloat16,
+        )
+        print(f"[model] loaded. dtype={next(model.parameters()).dtype}")
+
     model.config.use_cache = False
-    model.gradient_checkpointing_enable()
 
     # Nemotron 特有の fast path を無効化（学習時の安定性確保）
     for name, mod in sys.modules.items():
@@ -204,7 +259,6 @@ def load_model_and_tokenizer(model_dir: str):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"[model] loaded. dtype={next(model.parameters()).dtype}")
     return model, tokenizer
 
 
@@ -219,6 +273,14 @@ TARGET_MODULES = [
 ]
 
 def apply_lora(model, args):
+    if args.load_in_4bit:
+        from peft import prepare_model_for_kbit_training
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=True
+        )
+    else:
+        model.gradient_checkpointing_enable()
+
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=args.lora_rank,
@@ -239,20 +301,21 @@ def apply_lora(model, args):
 def train(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Kaggle 環境なら Triton パッチを適用
+    # Kaggle 環境: offline wheel から mamba_ssm をインストール → Triton パッチ
     if os.path.exists("/kaggle"):
+        setup_kaggle_env()
         apply_triton_patch()
 
     # データ
     dataset = load_dataset(args.data_csv, args.extra_csv, args.subsample)
 
     # モデル・トークナイザ
-    model, tokenizer = load_model_and_tokenizer(args.model_dir)
+    model, tokenizer = load_model_and_tokenizer(args.model_dir, args.load_in_4bit)
     model = apply_lora(model, args)
 
-    # テキスト変換 - "text" 列だけのデータセットに変換する
-    # TRL 1.1.0 は "prompt" 列があると prompt/completion フォーマットと判断し
-    # "completion" 列も要求するため、事前に "text" のみに変換して渡す
+    # テキスト変換 - "text" 列のみのデータセットに変換
+    # TRL は "prompt" 列があると prompt/completion フォーマットと判断するため
+    # 事前に "text" のみに変換してから渡す
     text_dataset = dataset.map(
         lambda example: {"text": build_training_text(tokenizer, example)},
         remove_columns=dataset.column_names,
@@ -261,8 +324,8 @@ def train(args):
     print(f"[data] formatted {len(text_dataset)} samples")
 
     # 学習設定
-    total_steps = (len(text_dataset) // (args.batch_size * args.grad_accum)) * args.epochs
-    warmup_steps = max(1, int(total_steps * 0.05))
+    total_steps   = (len(text_dataset) // (args.batch_size * args.grad_accum)) * args.epochs
+    warmup_steps  = max(1, int(total_steps * 0.05))
 
     training_args = SFTConfig(
         output_dir=args.output_dir,
@@ -274,9 +337,10 @@ def train(args):
         warmup_steps=warmup_steps,
         bf16=True,
         logging_steps=10,
-        save_strategy="no",        # Kaggle の容量節約
+        save_strategy="no",
         report_to="none",
         dataloader_pin_memory=False,
+        max_length=args.max_seq_len,
     )
 
     trainer = SFTTrainer(
