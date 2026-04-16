@@ -38,7 +38,6 @@ from pathlib import Path
 import pandas as pd
 import torch
 from datasets import Dataset
-from trl import SFTTrainer, SFTConfig
 
 
 # ---------------------------------------------------------------------------
@@ -118,17 +117,25 @@ def install_unsloth():
     except ImportError:
         pass
 
-    # オフライン wheel を探す（unsloth_zoo は依存ライブラリなので除外）
-    wheels = sorted(
+    # オフライン wheel を探す
+    # unsloth_zoo（依存ライブラリ）を先にインストールし、その後 unsloth 本体を入れる
+    zoo_wheels = sorted(glob.glob("/kaggle/input/**/unsloth_zoo-*.whl", recursive=True))
+    main_wheels = sorted(
         w for w in glob.glob("/kaggle/input/**/unsloth-*.whl", recursive=True)
-        if "unsloth_zoo" not in Path(w).name and "unsloth-zoo" not in Path(w).name
+        if "unsloth_zoo" not in Path(w).name
     )
-    if wheels:
+    if main_wheels:
+        if zoo_wheels:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", zoo_wheels[-1]],
+                check=True,
+            )
+            print(f"[setup] installed offline: {Path(zoo_wheels[-1]).name}")
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", wheels[-1]],
+            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", main_wheels[-1]],
             check=True,
         )
-        print(f"[setup] installed offline: {Path(wheels[-1]).name}")
+        print(f"[setup] installed offline: {Path(main_wheels[-1]).name}")
         return
 
     # オンラインインストール（enable_internet=true の場合）
@@ -530,6 +537,9 @@ def train(args):
         print(f"[train] checkpoint dir: {ckpt_dir} (every {args.save_steps} steps)")
     else:
         save_strategy = "no"
+
+    # Unsloth インストール後に trl をインポート（import 順序が重要）
+    from trl import SFTTrainer, SFTConfig
 
     # 学習設定
     training_args = SFTConfig(
