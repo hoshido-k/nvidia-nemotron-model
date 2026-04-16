@@ -118,8 +118,11 @@ def install_unsloth():
     except ImportError:
         pass
 
-    # オフライン wheel を探す
-    wheels = sorted(glob.glob("/kaggle/input/**/unsloth*.whl", recursive=True))
+    # オフライン wheel を探す（unsloth_zoo は依存ライブラリなので除外）
+    wheels = sorted(
+        w for w in glob.glob("/kaggle/input/**/unsloth-*.whl", recursive=True)
+        if "unsloth_zoo" not in Path(w).name and "unsloth-zoo" not in Path(w).name
+    )
     if wheels:
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "-q", "--no-deps", wheels[-1]],
