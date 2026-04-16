@@ -108,54 +108,7 @@ def setup_kaggle_env():
             print("[setup] bitsandbytes wheel not found (QLoRA --load_in_4bit は使用不可)")
 
 
-def install_unsloth():
-    """Unsloth をインストールする。オフライン wheel があればそちらを優先。"""
-    try:
-        import unsloth  # noqa: F401
-        print("[setup] unsloth already available")
-        return
-    except ImportError:
-        pass
 
-    # オフライン wheel を探す
-    # unsloth_zoo（依存ライブラリ）を先にインストールし、その後 unsloth 本体を入れる
-    zoo_wheels = sorted(glob.glob("/kaggle/input/**/unsloth_zoo-*.whl", recursive=True))
-    main_wheels = sorted(
-        w for w in glob.glob("/kaggle/input/**/unsloth-*.whl", recursive=True)
-        if "unsloth_zoo" not in Path(w).name
-    )
-    if main_wheels:
-        if zoo_wheels:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-q", zoo_wheels[-1]],
-                check=True,
-            )
-            print(f"[setup] installed offline: {Path(zoo_wheels[-1]).name}")
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", main_wheels[-1]],
-            check=True,
-        )
-        print(f"[setup] installed offline: {Path(main_wheels[-1]).name}")
-        return
-
-    # オンラインインストール（enable_internet=true の場合）
-    # mayukh18/nemotron-packages にオフライン wheel がある場合はそこからも探す
-    packages_dir = "/kaggle/input/datasets/mayukh18/nemotron-packages/packages"
-    if os.path.isdir(packages_dir):
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q",
-             "--no-index", "--find-links", packages_dir,
-             "unsloth"],
-            check=True,
-        )
-        print(f"[setup] installed unsloth from {packages_dir}")
-        return
-
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", "unsloth"],
-        check=True,
-    )
-    print("[setup] installed unsloth from PyPI")
 
 
 # ---------------------------------------------------------------------------
@@ -507,12 +460,11 @@ def train(args):
 
     use_unsloth = not args.no_unsloth
 
-    # Kaggle 環境: 依存パッケージ → Triton パッチ → Unsloth インストール
+    # Kaggle 環境: 依存パッケージ → Triton パッチ
+    # Unsloth のインストールはノートブック側 cell-2 で実施済み
     if os.path.exists("/kaggle"):
         setup_kaggle_env()
         apply_triton_patch()
-        if use_unsloth:
-            install_unsloth()
 
     # モデル・トークナイザ（データロードより先にトークナイザが必要）
     if use_unsloth:
