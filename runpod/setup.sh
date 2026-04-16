@@ -33,8 +33,9 @@ else
 fi
 
 echo "=== [2/5] mamba-ssm + causal-conv1d (sm_89 Ada Lovelace, CUDAビルド) ==="
-# CUDA拡張のビルドが必要なため pip で個別インストール
-pip install mamba-ssm causal-conv1d
+# --no-build-isolation: pip の隔離ビルド環境を使わず、
+# 既にインストール済みの torch 2.4.0+cu124 でビルドする
+pip install --no-build-isolation mamba-ssm causal-conv1d
 
 echo "=== [3/5] ML ライブラリ (uv) ==="
 uv pip install --system -r "$REPO_DIR/runpod/requirements.txt"
