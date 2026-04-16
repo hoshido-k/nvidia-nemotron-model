@@ -24,6 +24,7 @@ Usage:
 import argparse
 import glob
 import os
+import re
 import subprocess
 import sys
 import json
@@ -52,12 +53,12 @@ def parse_args():
     p.add_argument("--extra_csv",    default=None,   help="追加データ CSV（任意）")
     p.add_argument("--lora_rank",    type=int,   default=32)
     p.add_argument("--lora_alpha",   type=int,   default=32)
-    p.add_argument("--lora_dropout", type=float, default=0.0)
+    p.add_argument("--lora_dropout", type=float, default=0.05)
     p.add_argument("--epochs",       type=int,   default=2)
-    p.add_argument("--batch_size",   type=int,   default=4)
-    p.add_argument("--grad_accum",   type=int,   default=1)
-    p.add_argument("--lr",           type=float, default=5e-5)
-    p.add_argument("--max_seq_len",  type=int,   default=2048)
+    p.add_argument("--batch_size",   type=int,   default=1)
+    p.add_argument("--grad_accum",   type=int,   default=8)
+    p.add_argument("--lr",           type=float, default=1e-4)
+    p.add_argument("--max_seq_len",  type=int,   default=4096)
     p.add_argument("--subsample",    type=int,   default=None, help="データをサブサンプリング（動作確認用）")
     p.add_argument("--zip_output",   action="store_true", help="アダプタを submission.zip に圧縮")
     p.add_argument("--load_in_4bit", action="store_true", help="4bit量子化でロード（QLoRA）。VRAM 節約・高速化")
@@ -192,8 +193,10 @@ def load_dataset(data_csv: str, extra_csv: str | None, subsample: int | None) ->
 def build_training_text(tokenizer, example: dict) -> str:
     """1サンプルを chat template 形式に変換する。
 
-    CoT あり: 推論過程 + \\boxed{answer}
-    CoT なし: answer のみ
+    CoT あり: CoT（\boxed{}除去済み）+ </think>\n\boxed{answer}
+    CoT なし: \boxed{answer} のみ
+
+    chat template が <think>\n を自動付加するため assistant は CoT から始まる。
     """
     cot    = example.get("generated_cot", "")
     answer = str(example["answer"])
@@ -201,8 +204,10 @@ def build_training_text(tokenizer, example: dict) -> str:
 
     user_msg = prompt + PROMPT_SUFFIX
 
-    if cot and str(cot).strip():
-        assistant_msg = f"{cot}\n\n\\boxed{{{answer}}}"
+    if cot and str(cot).strip() and len(str(cot).strip()) >= 5:
+        # CoT 内の \boxed{} を除去してクリーンな推論テキストにする
+        cot_cleaned = re.sub(r'\\boxed\{[^}]*\}', '', str(cot)).rstrip()
+        assistant_msg = cot_cleaned + f"\n</think>\n\\boxed{{{answer}}}"
     else:
         assistant_msg = f"\\boxed{{{answer}}}"
 
@@ -271,11 +276,8 @@ def load_model_and_tokenizer(model_dir: str, load_in_4bit: bool = False):
 # LoRA
 # ---------------------------------------------------------------------------
 
-TARGET_MODULES = [
-    "q_proj", "k_proj", "v_proj", "o_proj",
-    "in_proj", "out_proj", "up_proj", "down_proj",
-    "lm_head",
-]
+# Mamba 系レイヤーのみを対象とする（Kaggle ノートブックと同じ）
+TARGET_MODULES = r".*\.(in_proj|out_proj|up_proj|down_proj)$"
 
 def apply_lora(model, args):
     if args.load_in_4bit:
@@ -292,7 +294,9 @@ def apply_lora(model, args):
         torch.Tensor.index_add_ = _patched_index_add_
         print("[patch] index_add_ dtype mismatch patch applied")
     else:
-        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
 
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -345,9 +349,6 @@ def train(args):
     print(f"[data] formatted {len(text_dataset)} samples")
 
     # 学習設定
-    total_steps   = (len(text_dataset) // (args.batch_size * args.grad_accum)) * args.epochs
-    warmup_steps  = max(1, int(total_steps * 0.05))
-
     training_args = SFTConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
@@ -355,13 +356,16 @@ def train(args):
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_steps=warmup_steps,
+        warmup_ratio=0.05,
         bf16=True,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         logging_steps=10,
         save_strategy="no",
         report_to="none",
-        dataloader_pin_memory=False,
+        dataloader_num_workers=2,
         max_length=args.max_seq_len,
+        remove_unused_columns=False,
     )
 
     trainer = SFTTrainer(
