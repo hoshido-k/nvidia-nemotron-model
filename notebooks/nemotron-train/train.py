@@ -251,14 +251,10 @@ def train(args):
     model = apply_lora(model, args)
 
     # テキスト変換
-    def formatting_func(samples):
-        return [
-            build_training_text(
-                tokenizer,
-                {k: samples[k][i] for k in samples}
-            )
-            for i in range(len(samples["prompt"]))
-        ]
+    # TRL の新バージョンは batched=False で呼ぶため、
+    # 単一サンプル（dict of scalars）を受け取り文字列を返す形式にする
+    def formatting_func(example):
+        return build_training_text(tokenizer, example)
 
     # 学習設定
     # max_seq_length は TRL バージョンによって SFTConfig/SFTTrainer どちらも
