@@ -12,7 +12,7 @@ Usage:
         --data_csv  /path/to/train_split_with_cot.csv \
         --output_dir /path/to/output \
         --lora_rank 32 \
-        --epochs 2
+        --epochs 1
 
     # 4bit量子化（QLoRA）— VRAM 節約・高速化
     python train.py ... --load_in_4bit
@@ -38,6 +38,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 from datasets import Dataset
+from trl import SFTTrainer, SFTConfig
 
 
 # ---------------------------------------------------------------------------
@@ -52,17 +53,16 @@ def parse_args():
     p.add_argument("--extra_csv",    default=None,   help="追加データ CSV（任意）")
     p.add_argument("--lora_rank",    type=int,   default=32)
     p.add_argument("--lora_alpha",   type=int,   default=32)
-    p.add_argument("--lora_dropout", type=float, default=0.05)
-    p.add_argument("--epochs",       type=int,   default=2)
+    p.add_argument("--lora_dropout", type=float, default=0.0)
+    p.add_argument("--epochs",       type=int,   default=1)
     p.add_argument("--batch_size",   type=int,   default=1)
-    p.add_argument("--grad_accum",   type=int,   default=8)
-    p.add_argument("--lr",           type=float, default=1e-4)
-    p.add_argument("--max_seq_len",  type=int,   default=4096)
+    p.add_argument("--grad_accum",   type=int,   default=32)
+    p.add_argument("--lr",           type=float, default=2e-4)
+    p.add_argument("--max_seq_len",  type=int,   default=8192)
     p.add_argument("--subsample",    type=int,   default=None, help="データをサブサンプリング（動作確認用）")
     p.add_argument("--zip_output",   action="store_true", help="アダプタを submission.zip に圧縮")
     p.add_argument("--load_in_4bit", action="store_true", help="4bit量子化でロード（QLoRA）。VRAM 節約・高速化")
     p.add_argument("--save_steps",   type=int, default=None, help="N ステップごとにチェックポイントを保存")
-    p.add_argument("--no_unsloth",   action="store_true", help="Unsloth を使わず従来の transformers+PEFT で学習")
     return p.parse_args()
 
 
@@ -93,7 +93,7 @@ def setup_kaggle_env():
             "UTILITY SCRIPTS (ryanholbrook/nvidia-utility-script) を Input に追加してください。"
         )
 
-    # bitsandbytes（QLoRA 用）: dennisfong/nvidia-nemotron-offline-packages から
+    # bitsandbytes（QLoRA 用）
     try:
         import bitsandbytes  # noqa: F401
     except ImportError:
@@ -106,9 +106,6 @@ def setup_kaggle_env():
             print(f"[setup] installed: {Path(bnb_wheels[-1]).name}")
         else:
             print("[setup] bitsandbytes wheel not found (QLoRA --load_in_4bit は使用不可)")
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -277,10 +274,10 @@ def load_formatted_dataset(
 def build_training_text(tokenizer, example: dict) -> str:
     """1サンプルを chat template 形式に変換する。
 
-    CoT あり: CoT（\boxed{}除去済み）+ </think>\n\boxed{answer}
-    CoT なし: \boxed{answer} のみ
+    CoT あり: CoT（\\boxed{}除去済み）+ </think>\\n\\boxed{answer}
+    CoT なし: \\boxed{answer} のみ
 
-    chat template が <think>\n を自動付加するため assistant は CoT から始まる。
+    chat template が <think>\\n を自動付加するため assistant は CoT から始まる。
     """
     cot    = example.get("generated_cot", "")
     answer = str(example["answer"])
@@ -289,7 +286,6 @@ def build_training_text(tokenizer, example: dict) -> str:
     user_msg = prompt + PROMPT_SUFFIX
 
     if cot and str(cot).strip() and len(str(cot).strip()) >= 5:
-        # CoT 内の \boxed{} を除去してクリーンな推論テキストにする
         cot_cleaned = re.sub(r'\\boxed\{[^}]*\}', '', str(cot)).rstrip()
         assistant_msg = cot_cleaned + f"\n</think>\n\\boxed{{{answer}}}"
     else:
@@ -320,28 +316,12 @@ def build_training_text(tokenizer, example: dict) -> str:
 # モデル
 # ---------------------------------------------------------------------------
 
-def load_model_and_tokenizer_unsloth(model_dir: str, max_seq_len: int, load_in_4bit: bool = False):
-    """Unsloth の FastLanguageModel でモデルとトークナイザを読み込む。"""
-    from unsloth import FastLanguageModel
+def load_model_and_tokenizer(model_dir: str, load_in_4bit: bool = False):
+    """モデルとトークナイザを読み込む。
 
-    print(f"[model] loading with Unsloth from {model_dir} ...")
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_dir,
-        max_seq_length=max_seq_len,
-        load_in_4bit=load_in_4bit,
-        load_in_8bit=False,
-        full_finetuning=False,
-        trust_remote_code=True,
-        dtype=torch.bfloat16,
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    print("[model] loaded with Unsloth.")
-    return model, tokenizer
-
-
-def load_model_and_tokenizer_hf(model_dir: str, load_in_4bit: bool = False):
-    """従来の transformers でモデルとトークナイザを読み込む。"""
+    load_in_4bit=True: NF4 量子化（QLoRA）。VRAM を大幅削減し高速化。
+    load_in_4bit=False: BF16 フル精度。本番学習向け。
+    """
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     print(f"[model] loading from {model_dir} ...")
@@ -361,7 +341,6 @@ def load_model_and_tokenizer_hf(model_dir: str, load_in_4bit: bool = False):
             quantization_config=bnb_config,
         )
         print("[model] loaded. 4-bit NF4 quantized (QLoRA)")
-        print(f"[model] device: {next(model.parameters()).device}")
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model_dir,
@@ -369,7 +348,7 @@ def load_model_and_tokenizer_hf(model_dir: str, load_in_4bit: bool = False):
             trust_remote_code=True,
             dtype=torch.bfloat16,
         )
-        print(f"[model] loaded. dtype={next(model.parameters()).dtype}, device={next(model.parameters()).device}")
+        print(f"[model] loaded. dtype={next(model.parameters()).dtype}")
 
     model.config.use_cache = False
 
@@ -384,40 +363,20 @@ def load_model_and_tokenizer_hf(model_dir: str, load_in_4bit: bool = False):
 # LoRA
 # ---------------------------------------------------------------------------
 
-# Attention + Mamba + lm_head を対象とする
+# Attention + Mamba + lm_head を対象とする（Tong Hui Kang 準拠）
 TARGET_MODULES = [
-    "q_proj", "k_proj", "v_proj", "o_proj",      # Attention
-    "in_proj", "out_proj", "up_proj", "down_proj", # Mamba
+    "q_proj", "k_proj", "v_proj", "o_proj",       # Attention
+    "in_proj", "out_proj", "up_proj", "down_proj",  # Mamba
     "lm_head",
 ]
 
-def apply_lora_unsloth(model, args):
-    """Unsloth の FastLanguageModel.get_peft_model で LoRA を適用する。"""
-    from unsloth import FastLanguageModel
-
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        target_modules=TARGET_MODULES,
-        bias="none",
-        use_gradient_checkpointing="unsloth",
-        random_state=42,
-    )
-    model.print_trainable_parameters()
-    return model
-
-
-def apply_lora_peft(model, args):
-    """従来の PEFT get_peft_model で LoRA を適用する。"""
+def apply_lora(model, args):
+    """PEFT get_peft_model で LoRA を適用する。"""
     from peft import LoraConfig, get_peft_model, TaskType
 
     if args.load_in_4bit:
         from peft import prepare_model_for_kbit_training
-        model = prepare_model_for_kbit_training(
-            model, use_gradient_checkpointing=True
-        )
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
         # Nemotron-H MoE の index_add_ で BF16/FP32 の型不一致が起きるためパッチ
         _orig_index_add_ = torch.Tensor.index_add_
         def _patched_index_add_(self, dim, index, source, *args, **kwargs):
@@ -458,23 +417,14 @@ def train(args):
     else:
         print("[env] WARNING: CUDA not available — running on CPU!")
 
-    use_unsloth = not args.no_unsloth
-
     # Kaggle 環境: 依存パッケージ → Triton パッチ
-    # Unsloth のインストールはノートブック側 cell-2 で実施済み
     if os.path.exists("/kaggle"):
         setup_kaggle_env()
         apply_triton_patch()
 
-    # モデル・トークナイザ（データロードより先にトークナイザが必要）
-    if use_unsloth:
-        model, tokenizer = load_model_and_tokenizer_unsloth(
-            args.model_dir, args.max_seq_len, args.load_in_4bit,
-        )
-        model = apply_lora_unsloth(model, args)
-    else:
-        model, tokenizer = load_model_and_tokenizer_hf(args.model_dir, args.load_in_4bit)
-        model = apply_lora_peft(model, args)
+    # モデル・トークナイザ・LoRA
+    model, tokenizer = load_model_and_tokenizer(args.model_dir, args.load_in_4bit)
+    model = apply_lora(model, args)
 
     # データ（キャッシュ付き: 2回目以降は数秒でロード）
     text_dataset = load_formatted_dataset(
@@ -490,22 +440,20 @@ def train(args):
     else:
         save_strategy = "no"
 
-    # Unsloth インストール後に trl をインポート（import 順序が重要）
-    from trl import SFTTrainer, SFTConfig
-
-    # 学習設定
+    # 学習設定（Tong Hui Kang 準拠: linear scheduler / warmup なし / beta2=0.95）
     training_args = SFTConfig(
         output_dir=ckpt_dir if args.save_steps else args.output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
+        lr_scheduler_type="linear",
+        warmup_steps=0,
+        adam_beta2=0.95,
+        max_grad_norm=1e9,
         bf16=True,
         tf32=True,
-        gradient_checkpointing=not use_unsloth,
-        gradient_checkpointing_kwargs={"use_reentrant": False} if not use_unsloth else {},
+        gradient_checkpointing=False,
         logging_steps=10,
         save_strategy=save_strategy,
         save_steps=args.save_steps or 500,
