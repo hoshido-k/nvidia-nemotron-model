@@ -62,7 +62,8 @@ def parse_args():
     p.add_argument("--subsample",    type=int,   default=None, help="データをサブサンプリング（動作確認用）")
     p.add_argument("--zip_output",   action="store_true", help="アダプタを submission.zip に圧縮")
     p.add_argument("--load_in_4bit", action="store_true", help="4bit量子化でロード（QLoRA）。VRAM 節約・高速化")
-    p.add_argument("--save_steps",   type=int, default=None, help="N ステップごとにチェックポイントを保存")
+    p.add_argument("--save_steps",     type=int, default=None, help="N ステップごとにチェックポイントを保存")
+    p.add_argument("--logging_steps",  type=int, default=10,   help="N ステップごとにログを出力")
     return p.parse_args()
 
 
@@ -453,7 +454,7 @@ def train(args):
         bf16=True,
         tf32=True,
         gradient_checkpointing=False,
-        logging_steps=10,
+        logging_steps=args.logging_steps,
         save_strategy=save_strategy,
         save_steps=args.save_steps or 500,
         save_total_limit=1,
