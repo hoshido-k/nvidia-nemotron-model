@@ -2,7 +2,7 @@
 
 Kaggle コンペ [NVIDIA Nemotron Model Reasoning Challenge](https://www.kaggle.com/competitions/nvidia-nemotron-model-reasoning-challenge) の実験リポジトリ。
 
-ベースモデル `nemotron-3-nano-30b-a3b-bf16` に対して LoRA アダプタを学習・提出し、数学推論の精度を競う。
+ベースモデル `nemotron-3-nano-30b-a3b-bf16`（30B パラメータ Hybrid Mamba-Transformer MoE）に対して LoRA アダプタを学習・提出し、数学推論の精度を競う。
 
 ---
 
@@ -11,19 +11,36 @@ Kaggle コンペ [NVIDIA Nemotron Model Reasoning Challenge](https://www.kaggle.
 ```
 .
 ├── notebooks/
+│   ├── nemotron-train/
+│   │   ├── train.py             # 学習スクリプト本体（唯一の編集対象）
+│   │   ├── train.ipynb          # 学習実行ノートブック
+│   │   └── kernel-metadata.json
 │   └── nvidia-nemotron-model-reasoning-challenge/
-│       ├── nvidia-nemotron-model-reasoning-challenge.ipynb  # メインノートブック
-│       └── kernel-metadata.json                             # Kaggle Push 設定
-├── data/                        # ローカルデータ（.gitignore 済み）
-│   ├── nvidia-nemotron-competition/   # コンペデータ
-│   ├── nvidia-nemotron-all-linear/    # 公開ベスト解アダプタ
-│   └── nvidia-metric-utility-script/ # 公式ユーティリティ
+│       ├── nvidia-nemotron-model-reasoning-challenge.ipynb  # 推論・提出ノートブック
+│       └── kernel-metadata.json
+├── kaggle-datasets/
+│   └── nemotron-train-scripts/  # CI 自動生成物（直接編集しない）
 ├── .github/
-│   └── workflows/
-│       └── kaggle-push-nvidia-nemotron-model-reasoning-challenge.yml
-├── PLAN.md       # 実験計画
+│   └── workflows/               # GitHub Actions（Kaggle Dataset 自動同期）
+├── CLAUDE.md
 ├── .gitignore
-└── .env          # API キー（Git 管理外）
+└── .env                         # API キー（Git 管理外）
+```
+
+---
+
+## 学習 → 提出フロー
+
+```
+train.py 編集
+    ↓ git push main
+GitHub Actions → Kaggle Dataset (shotokishida/nemotron-train-scripts) に同期
+    ↓
+Kaggle: nemotron-train ノートブックを Run & All
+    ↓ adapter ファイルが /kaggle/working/adapter/ に出力
+Kaggle モデル (shotokishida/nemotron-adapter) にアップロード
+    ↓
+Kaggle: nvidia-nemotron-model-reasoning-challenge ノートブックを Run & All → 提出
 ```
 
 ---
@@ -32,11 +49,8 @@ Kaggle コンペ [NVIDIA Nemotron Model Reasoning Challenge](https://www.kaggle.
 
 | 環境 | 用途 | GPU |
 |------|------|-----|
-| Kaggle Notebook | 本番推論・提出 | RTX Pro 6000 (96GB) |
-| RunPod | 動作確認・実験 | RTX 6000 Ada (48GB) |
-| MacBook | EDA・コード設計 | なし |
-
-ノートブックは `ENV` 変数で実行環境を自動検出し、パスを切り替える。
+| Kaggle Notebook | 本番学習・推論・提出 | RTX Pro 6000 Blackwell (95GB VRAM) |
+| MacBook | コード設計・EDA | なし |
 
 ---
 
@@ -55,45 +69,31 @@ Kaggle コンペ [NVIDIA Nemotron Model Reasoning Challenge](https://www.kaggle.
 ### ローカル（MacBook）
 
 ```bash
-# データダウンロード
 export $(cat .env | xargs)
 
+# コンペデータ
 mkdir -p data/nvidia-nemotron-competition
 uv run kaggle competitions download -c nvidia-nemotron-model-reasoning-challenge \
   -p data/nvidia-nemotron-competition
 
-uv run kaggle kernels output huikang/nvidia-nemotron-all-linear \
-  -p data/nvidia-nemotron-all-linear
-
+# 公式ユーティリティ
 uv run kaggle kernels output metric/nvidia-metric-utility-script \
   -p data/nvidia-metric-utility-script
-```
-
-### RunPod
-
-```bash
-# Pod 内で実行（KAGGLE_USERNAME / KAGGLE_KEY は Pod 環境変数に設定済みの前提）
-pip install vllm bitsandbytes peft transformers accelerate kaggle safetensors tqdm pandas
-
-git clone https://github.com/hoshido-k/nvidia-nemotron-model.git /workspace/repo
-cd /workspace/repo
-
-# ノートブックの ENV セットアップセルを実行するとデータが自動ダウンロードされる
 ```
 
 ---
 
 ## Kaggle への Push
 
-`main` ブランチに push すると GitHub Actions が自動で Kaggle にデプロイする。
+`main` ブランチに push すると GitHub Actions が自動で Kaggle Dataset にデプロイする。
 
 ```bash
-git add notebooks/nvidia-nemotron-model-reasoning-challenge/
-git commit -m "update notebook"
+git add notebooks/nemotron-train/train.py
+git commit -m "update train.py"
 git push
 ```
 
-手動 Push:
+推論ノートブックの手動 Push:
 ```bash
 export $(cat .env | xargs)
 uv run kaggle kernels push -p notebooks/nvidia-nemotron-model-reasoning-challenge
@@ -101,13 +101,14 @@ uv run kaggle kernels push -p notebooks/nvidia-nemotron-model-reasoning-challeng
 
 ---
 
-## 実験計画
+## 学習設定（dgxchen / Tong Hui Kang 準拠）
 
-詳細は [PLAN.md](./PLAN.md) を参照。
-
-| フェーズ | 内容 | 目標 |
-|---------|------|------|
-| Phase 1 | 環境構築・ベースライン提出 | スコアボードに乗る |
-| Phase 2 | LoRA ファインチューニング | ベースライン + 数ポイント |
-| Phase 3 | Gemini 2.5 Pro 蒸留 | さらに + 数ポイント |
-| Phase 4 | TTT・アンサンブル等 | 上位を狙う |
+| パラメータ | 値 | 備考 |
+|---|---|---|
+| `lora_rank` | 32 | competition 上限 |
+| `epochs` | 1 | 過学習回避 |
+| `lr` | 2e-4 | linear scheduler |
+| `grad_accum` | 32 | 実効バッチサイズ 32 |
+| `max_seq_len` | 8192 | CoT が長いため |
+| `TARGET_MODULES` | q/k/v/o_proj + in/out/up/down_proj | Attention + Mamba 全層 |
+| `enable_thinking` | True | `apply_chat_template` で CoT 思考モード有効化 |
