@@ -363,11 +363,10 @@ def load_model_and_tokenizer(model_dir: str, load_in_4bit: bool = False):
 # LoRA
 # ---------------------------------------------------------------------------
 
-# Attention + Mamba + lm_head を対象とする（Tong Hui Kang 準拠）
+# Attention + Mamba を対象とする（lm_head は embedding 層全体保存で巨大化するため除外）
 TARGET_MODULES = [
     "q_proj", "k_proj", "v_proj", "o_proj",       # Attention
     "in_proj", "out_proj", "up_proj", "down_proj",  # Mamba
-    "lm_head",
 ]
 
 def apply_lora(model, args):
@@ -481,6 +480,8 @@ def train(args):
     print(f"[train] saving adapter to {args.output_dir}")
     model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
+    # trainer_state.json を保存（save_strategy="no" でも学習曲線を表示できるように）
+    trainer.state.save_to_json(str(Path(args.output_dir) / "trainer_state.json"))
 
     # adapter_config 確認
     cfg_path = Path(args.output_dir) / "adapter_config.json"
@@ -488,18 +489,16 @@ def train(args):
         with open(cfg_path) as f:
             print("[train] adapter_config:", json.dumps(json.load(f), indent=2))
 
-    # submission.zip 作成
+    # submission.zip 作成（推論に必要な2ファイルのみ）
     if args.zip_output:
         zip_path = str(Path(args.output_dir).parent / "submission.zip")
         required = ["adapter_config.json", "adapter_model.safetensors"]
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for fname in os.listdir(args.output_dir):
-                fpath = os.path.join(args.output_dir, fname)
-                if os.path.isfile(fpath):
-                    zf.write(fpath, fname)
         for req in required:
-            if req not in os.listdir(args.output_dir):
+            if not (Path(args.output_dir) / req).exists():
                 raise AssertionError(f"CRITICAL: {req} が見つかりません。提出に失敗します。")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fname in required:
+                zf.write(str(Path(args.output_dir) / fname), fname)
         size_mb = os.path.getsize(zip_path) / 1024 / 1024
         print(f"[train] submission.zip saved ({size_mb:.1f} MB): {zip_path}")
 
