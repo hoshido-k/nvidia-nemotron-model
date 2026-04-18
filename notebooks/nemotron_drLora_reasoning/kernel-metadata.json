@@ -1,6 +1,6 @@
 {
   "id": "shotokishida/nemotron-drlora-reasoning",
-  "title": "Nemotron DR-LoRA Reasoning",
+  "title": "Nemotron DRLoRA Reasoning",
   "code_file": "nemotron_drLora_reasoning.ipynb",
   "language": "python",
   "kernel_type": "notebook",
