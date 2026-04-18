@@ -1,7 +1,7 @@
 {
-  "id": "shotokishida/nvidia-nemotron-model-reasoning-challenge",
-  "title": "nvidia-nemotron-model-reasoning-challenge",
-  "code_file": "nvidia-nemotron-model-reasoning-challenge.ipynb",
+  "id": "shotokishida/nemotron-drlora-reasoning",
+  "title": "Nemotron DR-LoRA Reasoning",
+  "code_file": "nemotron_drLora_reasoning.ipynb",
   "language": "python",
   "kernel_type": "notebook",
   "is_private": "true",
