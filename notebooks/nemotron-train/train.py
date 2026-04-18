@@ -58,6 +58,7 @@ def parse_args():
     p.add_argument("--batch_size",   type=int,   default=1)
     p.add_argument("--grad_accum",   type=int,   default=32)
     p.add_argument("--lr",           type=float, default=2e-4)
+    p.add_argument("--warmup_ratio", type=float, default=0.0,  help="LR ウォームアップ比率（例: 0.05 = 全ステップの5%）")
     p.add_argument("--max_seq_len",  type=int,   default=8192)
     p.add_argument("--subsample",    type=int,   default=None, help="データをサブサンプリング（動作確認用）")
     p.add_argument("--zip_output",   action="store_true", help="アダプタを submission.zip に圧縮")
@@ -440,7 +441,7 @@ def train(args):
     else:
         save_strategy = "no"
 
-    # 学習設定（Tong Hui Kang 準拠: linear scheduler / warmup なし / beta2=0.95）
+    # 学習設定
     training_args = SFTConfig(
         output_dir=ckpt_dir if args.save_steps else args.output_dir,
         num_train_epochs=args.epochs,
@@ -448,7 +449,7 @@ def train(args):
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         lr_scheduler_type="linear",
-        warmup_steps=0,
+        warmup_ratio=args.warmup_ratio,
         adam_beta2=0.95,
         max_grad_norm=1e9,
         bf16=True,
